@@ -1,13 +1,9 @@
 local conf = require("telescope.config").values
 local utils = require "telescope.utils"
 local Path = require "plenary.path"
-local putils = require "telescope.previewers.utils"
 local from_entry = require "telescope.from_entry"
 local Previewer = require "telescope.previewers.previewer"
-
-local flatten = vim.tbl_flatten
-local buf_delete = utils.buf_delete
-local job_is_running = utils.job_is_running
+local putil = require "telescope.previewers.utils"
 
 local defaulter = utils.make_default_callable
 
@@ -18,17 +14,17 @@ local bat_options = { "--style=plain", "--color=always", "--paging=always" }
 local has_less = (vim.fn.executable "less" == 1) and conf.use_less
 
 local get_file_stat = function(filename)
-  return vim.loop.fs_stat(vim.fn.expand(filename)) or {}
+  return vim.loop.fs_stat(utils.path_expand(filename)) or {}
 end
 
 local list_dir = (function()
   if vim.fn.has "win32" == 1 then
     return function(dirname)
-      return { "cmd.exe", "/c", "dir", vim.fn.expand(dirname) }
+      return { "cmd.exe", "/c", "dir", utils.path_expand(dirname) }
     end
   else
     return function(dirname)
-      return { "ls", "-la", vim.fn.expand(dirname) }
+      return { "ls", "-la", utils.path_expand(dirname) }
     end
   end
 end)()
@@ -41,26 +37,26 @@ local bat_maker = function(filename, lnum, start, finish)
   local command = { "bat" }
 
   if lnum then
-    table.insert(command, { "--highlight-line", lnum })
+    vim.list_extend(command, { "--highlight-line", lnum })
   end
 
   if has_less then
     if start then
-      table.insert(command, { "--pager", string.format("less -RS +%s", start) })
+      vim.list_extend(command, { "--pager", string.format("less -RS +%s", start) })
     else
-      table.insert(command, { "--pager", "less -RS" })
+      vim.list_extend(command, { "--pager", "less -RS" })
     end
   else
     if start and finish then
-      table.insert(command, { "-r", string.format("%s:%s", start, finish) })
+      vim.list_extend(command, { "-r", string.format("%s:%s", start, finish) })
     end
   end
 
-  return flatten {
+  return utils.flatten {
     command,
     bat_options,
     "--",
-    vim.fn.expand(filename),
+    utils.path_expand(filename),
   }
 end
 
@@ -70,24 +66,23 @@ local cat_maker = function(filename, _, start, _)
   end
 
   if 1 == vim.fn.executable "file" then
-    local output = utils.get_os_command_output { "file", "--mime-type", "-b", filename }
-    local mime_type = vim.split(output[1], "/")[1]
-    if mime_type ~= "text" then
+    local mime_type = utils.get_os_command_output({ "file", "--mime-type", "-b", filename })[1]
+    if putil.binary_mime_type(mime_type) then
       return { "echo", "Binary file found. These files cannot be displayed!" }
     end
   end
 
   if has_less then
     if start then
-      return { "less", "-RS", string.format("+%s", start), vim.fn.expand(filename) }
+      return { "less", "-RS", string.format("+%s", start), utils.path_expand(filename) }
     else
-      return { "less", "-RS", vim.fn.expand(filename) }
+      return { "less", "-RS", utils.path_expand(filename) }
     end
   else
     return {
       "cat",
       "--",
-      vim.fn.expand(filename),
+      utils.path_expand(filename),
     }
   end
 end
@@ -107,9 +102,6 @@ local get_maker = function(opts)
   return maker
 end
 
--- TODO: We shoudl make sure that all our terminals close all the way.
---          Otherwise it could be bad if they're just sitting around, waiting to be closed.
---          I don't think that's the problem, but it could be?
 previewers.new_termopen_previewer = function(opts)
   opts = opts or {}
 
@@ -120,26 +112,24 @@ previewers.new_termopen_previewer = function(opts)
   local opt_teardown = opts.teardown
 
   local old_bufs = {}
+  local bufentry_table = {}
+  local term_ids = {}
 
   local function get_term_id(self)
-    if not self.state then
-      return nil
+    if self.state then
+      return self.state.termopen_id
     end
-    return self.state.termopen_id
   end
 
   local function get_bufnr(self)
-    if not self.state then
-      return nil
+    if self.state then
+      return self.state.termopen_bufnr
     end
-    return self.state.termopen_bufnr
   end
 
   local function set_term_id(self, value)
-    if job_is_running(get_term_id(self)) then
-      vim.fn.jobstop(get_term_id(self))
-    end
-    if self.state then
+    if self.state and term_ids[self.state.termopen_bufnr] == nil then
+      term_ids[self.state.termopen_bufnr] = value
       self.state.termopen_id = value
     end
   end
@@ -153,10 +143,22 @@ previewers.new_termopen_previewer = function(opts)
     end
   end
 
+  local function get_bufnr_by_bufentry(self, value)
+    if self.state then
+      return bufentry_table[value]
+    end
+  end
+
+  local function set_bufentry(self, value)
+    if self.state and value then
+      bufentry_table[value] = get_bufnr(self)
+    end
+  end
+
   function opts.setup(self)
     local state = {}
     if opt_setup then
-      vim.tbl_deep_extend("force", state, opt_setup(self))
+      state = vim.tbl_deep_extend("force", state, opt_setup(self))
     end
     return state
   end
@@ -166,42 +168,48 @@ previewers.new_termopen_previewer = function(opts)
       opt_teardown(self)
     end
 
-    local term_id = get_term_id(self)
-    if term_id and utils.job_is_running(term_id) then
-      vim.fn.jobclose(term_id)
-    end
-
-    set_term_id(self, nil)
     set_bufnr(self, nil)
+    set_bufentry(self, nil)
 
     for _, bufnr in ipairs(old_bufs) do
-      buf_delete(bufnr)
+      local term_id = term_ids[bufnr]
+      if term_id and utils.job_is_running(term_id) then
+        vim.fn.jobstop(term_id)
+      end
+      utils.buf_delete(bufnr)
     end
+    bufentry_table = {}
   end
 
   function opts.preview_fn(self, entry, status)
+    local preview_winid = status.layout.preview and status.layout.preview.winid
     if get_bufnr(self) == nil then
-      set_bufnr(self, vim.api.nvim_win_get_buf(status.preview_win))
+      set_bufnr(self, vim.api.nvim_win_get_buf(preview_winid))
     end
 
-    set_bufnr(self, vim.api.nvim_create_buf(false, true))
+    local prev_bufnr = get_bufnr_by_bufentry(self, entry)
+    if prev_bufnr then
+      set_bufnr(self, prev_bufnr)
+      utils.win_set_buf_noautocmd(preview_winid, self.state.termopen_bufnr)
+      self.state.termopen_id = term_ids[self.state.termopen_bufnr]
+    else
+      local bufnr = vim.api.nvim_create_buf(false, true)
+      set_bufnr(self, bufnr)
+      utils.win_set_buf_noautocmd(preview_winid, bufnr)
 
-    local bufnr = get_bufnr(self)
-    vim.api.nvim_win_set_buf(status.preview_win, bufnr)
+      local term_opts = {
+        cwd = opts.cwd or vim.loop.cwd(),
+        env = opts.env or conf.set_env,
+      }
 
-    local term_opts = {
-      cwd = opts.cwd or vim.fn.getcwd(),
-      env = conf.set_env,
-    }
-
-    putils.with_preview_window(status, bufnr, function()
       local cmd = opts.get_command(entry, status)
       if cmd then
-        set_term_id(self, vim.fn.termopen(cmd, term_opts))
+        vim.api.nvim_buf_call(bufnr, function()
+          set_term_id(self, vim.fn.termopen(cmd, term_opts))
+        end)
       end
-    end)
-
-    vim.api.nvim_buf_set_name(bufnr, tostring(bufnr))
+      set_bufentry(self, entry)
+    end
   end
 
   if not opts.send_input then
@@ -210,6 +218,10 @@ previewers.new_termopen_previewer = function(opts)
 
       local term_id = get_term_id(self)
       if term_id then
+        if not utils.job_is_running(term_id) then
+          return
+        end
+
         vim.fn.chansend(term_id, termcode)
       end
     end
@@ -240,11 +252,11 @@ previewers.cat = defaulter(function(opts)
   return previewers.new_termopen_previewer {
     title = "File Preview",
     dyn_title = function(_, entry)
-      return Path:new(from_entry.path(entry, true)):normalize(cwd)
+      return Path:new(from_entry.path(entry, false, false)):normalize(cwd)
     end,
 
     get_command = function(entry)
-      local p = from_entry.path(entry, true)
+      local p = from_entry.path(entry, true, false)
       if p == nil or p == "" then
         return
       end
@@ -263,14 +275,14 @@ previewers.vimgrep = defaulter(function(opts)
   return previewers.new_termopen_previewer {
     title = "Grep Preview",
     dyn_title = function(_, entry)
-      return Path:new(from_entry.path(entry, true)):normalize(cwd)
+      return Path:new(from_entry.path(entry, false, false)):normalize(cwd)
     end,
 
     get_command = function(entry, status)
-      local win_id = status.preview_win
+      local win_id = status.layout.preview and status.layout.preview.winid
       local height = vim.api.nvim_win_get_height(win_id)
 
-      local p = from_entry.path(entry, true)
+      local p = from_entry.path(entry, true, false)
       if p == nil or p == "" then
         return
       end
@@ -298,14 +310,14 @@ previewers.qflist = defaulter(function(opts)
   return previewers.new_termopen_previewer {
     title = "Grep Preview",
     dyn_title = function(_, entry)
-      return Path:new(from_entry.path(entry, true)):normalize(cwd)
+      return Path:new(from_entry.path(entry, false, false)):normalize(cwd)
     end,
 
     get_command = function(entry, status)
-      local win_id = status.preview_win
+      local win_id = status.layout.preview and status.layout.preview.winid
       local height = vim.api.nvim_win_get_height(win_id)
 
-      local p = from_entry.path(entry, true)
+      local p = from_entry.path(entry, true, false)
       if p == nil or p == "" then
         return
       end

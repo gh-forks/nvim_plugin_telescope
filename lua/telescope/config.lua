@@ -1,7 +1,6 @@
 local strings = require "plenary.strings"
 local deprecated = require "telescope.deprecated"
 local sorters = require "telescope.sorters"
-local if_nil = vim.F.if_nil
 local os_sep = require("plenary.path").path.sep
 local has_win = vim.fn.has "win32" == 1
 
@@ -69,7 +68,7 @@ config.descriptions = {}
 config.pickers = _TelescopeConfigurationPickers
 
 function config.set_pickers(pickers)
-  pickers = if_nil(pickers, {})
+  pickers = vim.F.if_nil(pickers, {})
 
   for k, v in pairs(pickers) do
     config.pickers[k] = v
@@ -163,7 +162,8 @@ append(
   - "reset" (default)
   - "follow"
   - "row"
-  - "closest"]]
+  - "closest"
+  - "none"]]
 )
 
 append(
@@ -188,19 +188,29 @@ append(
   Default: 'horizontal']]
 )
 
+append(
+  "create_layout",
+  nil,
+  [[
+  Configure the layout of Telescope pickers.
+  See |telescope.pickers.layout| for details.
+
+  Default: 'nil']]
+)
+
 append("layout_config", layout_config_defaults, layout_config_description)
 
 append(
   "cycle_layout_list",
   { "horizontal", "vertical" },
   [[
-  Determines the layouts to cycle through when using `actions.cycle_layout_next`
-  and `actions.cycle_layout_prev`.
+  Determines the layouts to cycle through when using `actions.layout.cycle_layout_next`
+  and `actions.layout.cycle_layout_prev`.
   Should be a list of "layout setups".
   Each "layout setup" can take one of two forms:
-  1. string <br>
+  1. string
       This is interpreted as the name of a `layout_strategy`
-  2. table <br>
+  2. table
       A table with possible keys `layout_strategy`, `layout_config` and `previewer`
 
   Default: { "horizontal", "vertical" }
@@ -209,12 +219,24 @@ append(
 
 append(
   "winblend",
-  0,
+  function()
+    return vim.o.winblend
+  end,
   [[
   Configure winblend for telescope floating windows. See |winblend| for
-  more information.
+  more information. Type can be a number or a function returning a
+  number
 
-  Default: 0]]
+  Default: function() return vim.o.winblend end]]
+)
+
+append(
+  "wrap_results",
+  false,
+  [[
+  Word wrap the search results
+
+  Default: false]]
 )
 
 append(
@@ -232,7 +254,6 @@ append(
   [[
   The character(s) that will be shown in front of the current selection.
 
-
   Default: '> ']]
 )
 
@@ -243,6 +264,18 @@ append(
   Prefix in front of each result entry. Current selection not included.
 
   Default: '  ']]
+)
+
+append(
+  "multi_icon",
+  "+",
+  [[
+  Symbol to add in front of a multi-selected result entry.
+  Replaces final character of |telescope.defaults.selection_caret| and
+  |telescope.defaults.entry_prefix| as appropriate.
+  To have no icon, set to the empty string.
+
+  Default: '+']]
 )
 
 append(
@@ -268,19 +301,22 @@ append(
   "path_display",
   {},
   [[
-  Determines how file paths are displayed
+  Determines how file paths are displayed.
 
   path_display can be set to an array with a combination of:
-  - "hidden"    hide file names
-  - "tail"      only display the file name, and not the path
-  - "absolute"  display absolute paths
-  - "smart"     remove as much from the path as possible to only show
-                the difference between the displayed paths
-  - "shorten"   only display the first character of each directory in
-                the path
-  - "truncate"  truncates the start of the path when the whole path will
-                not fit. To increase the the gap between the path and the edge.
-                set truncate to number `truncate = 3`
+  - "hidden"          hide file names
+  - "tail"            only display the file name, and not the path
+  - "absolute"        display absolute paths
+  - "smart"           remove as much from the path as possible to only show
+                      the difference between the displayed paths.
+                      Warning: The nature of the algorithm might have a negative
+                      performance impact!
+  - "shorten"         only display the first character of each directory in
+                      the path
+  - "truncate"        truncates the start of the path when the whole path will
+                      not fit. To increase the gap between the path and the edge,
+                      set truncate to number `truncate = 3`
+  - "filename_first"  shows filenames first and then the directories
 
   You can also specify the number of characters of each directory name
   to keep by setting `path_display.shorten = num`.
@@ -305,16 +341,56 @@ append(
     will give a path like:
       `al/beta/gamma/de`
 
+  path_display can also be set to 'filename_first' to put the filename
+  in front.
+
+    path_display = {
+      "filename_first"
+    },
+
+  The directory structure can be reversed as follows:
+
+    path_display = {
+      filename_first = {
+          reverse_directories = true
+      }
+    },
+
   path_display can also be set to 'hidden' string to hide file names
 
   path_display can also be set to a function for custom formatting of
-  the path display. Example:
+  the path display with the following signature
+
+  Signature: fun(opts: table, path: string): string, table?
+
+  The optional table is an list of positions and highlight groups to
+  set the highlighting of the return path string.
+
+  Example:
 
       -- Format path as "file.txt (path\to\file\)"
       path_display = function(opts, path)
         local tail = require("telescope.utils").path_tail(path)
         return string.format("%s (%s)", tail, path)
       end,
+
+      -- Format path and add custom highlighting
+      path_display = function(opts, path)
+        local tail = require("telescope.utils").path_tail(path)
+        path = string.format("%s (%s)", tail, path)
+
+        local highlights = {
+          {
+            {
+              0, -- highlight start position
+              #path, -- highlight end position
+            },
+            "Comment", -- highlight group name
+          },
+        }
+
+        return path, highlights
+      end
 
   Default: {}]]
 )
@@ -331,20 +407,42 @@ append(
 
 append(
   "get_status_text",
-  function(self)
-    local xx = (self.stats.processed or 0) - (self.stats.filtered or 0)
-    local yy = self.stats.processed or 0
-    if xx == 0 and yy == 0 then
-      return ""
+  function(self, opts)
+    local multi_select_cnt = #(self:get_multi_selection())
+    local showing_cnt = (self.stats.processed or 0) - (self.stats.filtered or 0)
+    local total_cnt = self.stats.processed or 0
+
+    local status_icon = ""
+    local status_text
+    if opts and not opts.completed then
+      status_icon = "*"
     end
 
-    -- local status_icon
-    -- if opts.completed then
-    --   status_icon = "✔️"
-    -- else
-    --   status_icon = "*"
-    -- end
-    return string.format("%s / %s", xx, yy)
+    if showing_cnt == 0 and total_cnt == 0 then
+      status_text = status_icon
+    elseif multi_select_cnt == 0 then
+      status_text = string.format("%s %s / %s", status_icon, showing_cnt, total_cnt)
+    else
+      status_text = string.format("%s %s / %s / %s", status_icon, multi_select_cnt, showing_cnt, total_cnt)
+    end
+
+    -- quick workaround for extmark right_align side-scrolling limitation
+    -- https://github.com/nvim-telescope/telescope.nvim/issues/2929
+    local prompt_width = vim.api.nvim_win_get_width(self.prompt_win)
+    local cursor_col = vim.api.nvim_win_get_cursor(self.prompt_win)[2]
+    local prefix_display_width = strings.strdisplaywidth(self.prompt_prefix) --[[@as integer]]
+    local prefix_width = #self.prompt_prefix
+    local prefix_shift = 0
+    if prefix_display_width ~= prefix_width then
+      prefix_shift = prefix_display_width
+    end
+
+    local cursor_occluded = (prompt_width - cursor_col - #status_text + prefix_shift) < 0
+    if cursor_occluded then
+      return ""
+    else
+      return status_text
+    end
   end,
   [[
   A function that determines what the virtual text looks like.
@@ -375,6 +473,51 @@ append(
 )
 
 append(
+  "results_title",
+  "Results",
+  [[
+  Defines the default title of the results window. A false value
+  can be used to hide the title altogether.
+
+  Default: "Results"]]
+)
+
+append(
+  "prompt_title",
+  "Prompt",
+  [[
+  Defines the default title of the prompt window. A false value
+  can be used to hide the title altogether. Most of the times builtins
+  define a prompt_title which will be preferred over this default.
+
+  Default: "Prompt"]]
+)
+
+append(
+  "mappings",
+  {},
+  [[
+  Your mappings to override telescope's default mappings.
+
+  See: ~
+      |telescope.mappings|
+  ]]
+)
+
+append(
+  "default_mappings",
+  nil,
+  [[
+  Not recommended to use except for advanced users.
+
+  Will allow you to completely remove all of telescope's default maps
+  and use your own.
+
+  Default: nil
+  ]]
+)
+
+append(
   "history",
   {
     path = vim.fn.stdpath "data" .. os_sep .. "telescope_history",
@@ -382,6 +525,7 @@ append(
     handler = function(...)
       return require("telescope.actions.history").get_simple_history(...)
     end,
+    cycle_wrap = false,
   },
   [[
   This field handles the configuration for prompt history.
@@ -397,20 +541,25 @@ append(
     },
 
   Fields:
-    - path:    The path to the telescope history as string.
-               default: stdpath("data")/telescope_history
-    - limit:   The amount of entries that will be written in the
-               history.
-               Warning: If limit is set to nil it will grown unbound.
-               default: 100
-    - handler: A lua function that implements the history.
-               This is meant as a developer setting for extensions to
-               override the history handling, e.g.,
-               https://github.com/nvim-telescope/telescope-smart-history.nvim,
-               which allows context sensitive (cwd + picker) history.
+    - path:       The path to the telescope history as string.
+                  Default: stdpath("data")/telescope_history
+    - limit:      The amount of entries that will be written in the
+                  history.
+                  Warning: If limit is set to nil it will grow unbound.
+                  Default: 100
+    - handler:    A lua function that implements the history.
+                  This is meant as a developer setting for extensions to
+                  override the history handling, e.g.,
+                  https://github.com/nvim-telescope/telescope-smart-history.nvim,
+                  which allows context sensitive (cwd + picker) history.
 
-               Default:
-               require('telescope.actions.history').get_simple_history]]
+                  Default:
+                  require('telescope.actions.history').get_simple_history
+    - cycle_wrap: Indicates whether the cycle_history_next and
+                  cycle_history_prev functions should wrap around to the
+                  beginning or end of the history entries on reaching
+                  their respective ends
+                  Default: false]]
 )
 
 append(
@@ -418,6 +567,7 @@ append(
   {
     num_pickers = 1,
     limit_entries = 1000,
+    ignore_empty_prompt = false,
   },
   [[
     This field handles the configuration for picker caching.
@@ -430,14 +580,19 @@ append(
     ('cache_picker.limit_entries`) are cached.
 
     Fields:
-      - num_pickers:      The number of pickers to be cached.
-                          Set to -1 to preserve all pickers of your session.
-                          If passed to a picker, the cached pickers with
-                          indices larger than `cache_picker.num_pickers` will
-                          be cleared.
-                          Default: 1
-      - limit_entries:    The amount of entries that will be written in the
-                          Default: 1000
+      - num_pickers:          The number of pickers to be cached.
+                              Set to -1 to preserve all pickers of your
+                              session. If passed to a picker, the cached
+                              pickers with indices larger than
+                              `cache_picker.num_pickers` will be cleared.
+                              Default: 1
+      - limit_entries:        The amount of entries that will be saved for
+                              each picker.
+                              Default: 1000
+      - ignore_empty_prompt:  If true, the picker will not be cached if
+                              the prompt is empty (i.e., no text has been
+                              typed at the time of closing the prompt).
+                              Default: false
     ]]
 )
 
@@ -446,6 +601,7 @@ append(
   {
     check_mime_type = not has_win,
     filesize_limit = 25,
+    highlight_limit = 1,
     timeout = 250,
     treesitter = true,
     msg_bg_fillchar = "╱",
@@ -461,8 +617,8 @@ append(
 
     Fields:
       - check_mime_type:  Use `file` if available to try to infer whether the
-                          file to preview is a binary if plenary's
-                          filetype detection fails.
+                          file to preview is a binary if filetype
+                          detection fails.
                           Windows users get `file` from:
                           https://github.com/julian-r/file-windows
                           Set to false to attempt to preview any mime type.
@@ -470,6 +626,9 @@ append(
       - filesize_limit:   The maximum file size in MB attempted to be previewed.
                           Set to false to attempt to preview any file size.
                           Default: 25
+      - highlight_limit:  The maximum file size in MB attempted to be highlighted.
+                          Set to false to attempt to highlight any file size.
+                          Default: 1
       - timeout:          Timeout the previewer if the preview did not
                           complete within `timeout` milliseconds.
                           Set to false to not timeout preview.
@@ -515,23 +674,32 @@ append(
                               end,
                             }
                           The configuration recipes for relevant examples.
-                          Note: if plenary does not recognize your filetype yet --
-                          1) Please consider contributing to:
-                             $PLENARY_REPO/data/plenary/filetypes/builtin.lua
-                          2) Register your filetype locally as per link
-                             https://github.com/nvim-lua/plenary.nvim#plenaryfiletype
+                          Note: we use vim.filetype filetype detection,
+                                so if you have troubles with files not
+                                highlighting correctly, please read
+                                |vim.filetype|
                           Default: nil
       - treesitter:       Determines whether the previewer performs treesitter
                           highlighting, which falls back to regex-based highlighting.
                           `true`: treesitter highlighting for all available filetypes
                           `false`: regex-based highlighting for all filetypes
-                          `table`: table of filetypes for which to attach treesitter
-                          highlighting
+                          `table`: may contain the following keys:
+                              - enable boolean|table: if boolean, enable ts
+                                                      highlighting for all supported
+                                                      filetypes.
+                                                      if table, ts highlighting is only
+                                                        enabled for given filetypes.
+                              - disable table: list of filetypes for which ts highlighting
+                                               is not used if `enable = true`.
                           Default: true
       - msg_bg_fillchar:  Character to fill background of unpreviewable buffers with
                           Default: "╱"
       - hide_on_startup:  Hide previewer when picker starts. Previewer can be toggled
-                          with actions.toggle_preview.
+                          with actions.layout.toggle_preview.
+                          Default: false
+      - ls_short:         Determines whether to use the `--short` flag for the `ls`
+                          command when previewing directories. Otherwise will result
+                          to using `--long`.
                           Default: false
     ]]
 )
@@ -584,79 +752,11 @@ append(
   "color_devicons",
   true,
   [[
-  Boolean if devicons should be enabled or not.
+  Boolean if devicons should be enabled or not. If set to false, the
+  text highlight group is used.
   Hint: Coloring only works if |termguicolors| is enabled.
 
   Default: true]]
-)
-
-append(
-  "mappings",
-  {},
-  [[
-  Your mappings to override telescope's default mappings.
-
-  Format is:
-  {
-    mode = { ..keys }
-  }
-
-  where {mode} is the one character letter for a mode
-  ('i' for insert, 'n' for normal).
-
-  For example:
-
-  mappings = {
-    i = {
-      ["<esc>"] = require('telescope.actions').close,
-    },
-  }
-
-
-  To disable a keymap, put [map] = false
-    So, to not map "<C-n>", just put
-
-      ...,
-      ["<C-n>"] = false,
-      ...,
-
-    Into your config.
-
-
-  otherwise, just set the mapping to the function that you want it to
-  be.
-
-      ...,
-      ["<C-i>"] = require('telescope.actions').select_default,
-      ...,
-
-  If the function you want is part of `telescope.actions`, then you can
-  simply give a string.
-    For example, the previous option is equivalent to:
-
-      ...,
-      ["<C-i>"] = "select_default",
-      ...,
-
-  You can also add other mappings using tables with `type = "command"`.
-    For example:
-
-      ...,
-      ["jj"] = { "<esc>", type = "command" },
-      ["kk"] = { "<cmd>echo \"Hello, World!\"<cr>", type = "command" },)
-      ...,
-  ]]
-)
-
-append(
-  "default_mappings",
-  nil,
-  [[
-  Not recommended to use except for advanced users.
-
-  Will allow you to completely remove all of telescope's default maps
-  and use your own.
-  ]]
 )
 
 append(
@@ -665,7 +765,7 @@ append(
   [[
   A function pointer that specifies the file_sorter. This sorter will
   be used for find_files, git_files and similar.
-  Hint: If you load a native sorter, you dont need to change this value,
+  Hint: If you load a native sorter, you don't need to change this value,
   the native sorter will override it anyway.
 
   Default: require("telescope.sorters").get_fzy_sorter]]
@@ -677,7 +777,7 @@ append(
   [[
   A function pointer to the generic sorter. The sorter that should be
   used for everything that is not a file.
-  Hint: If you load a native sorter, you dont need to change this value,
+  Hint: If you load a native sorter, you don't need to change this value,
   the native sorter will override it anyway.
 
   Default: require("telescope.sorters").get_fzy_sorter]]
@@ -690,9 +790,28 @@ append(
   [[
   This points to a wrapper sorter around the generic_sorter that is able
   to do prefiltering.
-  Its usually used for lsp_*_symbols and lsp_*_diagnostics
+  It's usually used for lsp_*_symbols and lsp_*_diagnostics
 
   Default: require("telescope.sorters").prefilter]]
+)
+
+append(
+  "tiebreak",
+  function(current_entry, existing_entry, _)
+    return #current_entry.ordinal < #existing_entry.ordinal
+  end,
+  [[
+  A function that determines how to break a tie when two entries have
+  the same score.
+  Having a function that always returns false would keep the entries in
+  the order they are found, so existing_entry before current_entry.
+  Vice versa always returning true would place the current_entry
+  before the existing_entry.
+
+  Signature: function(current_entry, existing_entry, prompt) -> boolean
+
+  Default: function that breaks the tie based on the length of the
+           entry's ordinal]]
 )
 
 append(
@@ -704,8 +823,52 @@ append(
   Example: { "%.npz" } -- ignore all npz files
   See: https://www.lua.org/manual/5.1/manual.html#5.4.1 for more
   information about lua regex
+  Note: `file_ignore_patterns` will be used in all pickers that have a
+  file associated. This might lead to the problem that lsp_ pickers
+  aren't displaying results because they might be ignored by
+  `file_ignore_patterns`. For example, setting up node_modules as ignored
+  will never show node_modules in any results, even if you are
+  interested in lsp_ results.
+
+  If you only want `file_ignore_patterns` for `find_files` and
+  `grep_string`/`live_grep` it is suggested that you setup `gitignore`
+  and have fd and or ripgrep installed because both tools will not show
+  `gitignore`d files on default.
 
   Default: nil]]
+)
+
+append(
+  "get_selection_window",
+  function()
+    return 0
+  end,
+  [[
+    Function that takes function(picker, entry) and returns a window id.
+    The window ID will be used to decide what window the chosen file will
+    be opened in and the cursor placed in upon leaving the picker.
+
+    Default: `function() return 0 end`
+  ]]
+)
+
+append(
+  "git_worktrees",
+  nil,
+  [[
+  A table of arrays of detached working trees with keys `gitdir` and `toplevel`.
+  Used to pass `--git-dir` and `--work-tree` flags to git commands when telescope fails
+  to infer the top-level directory of a given working tree based on cwd.
+  Example:
+  git_worktrees = {
+    {
+      toplevel = vim.env.HOME,
+      gitdir = vim.env.HOME .. '/.cfg'
+    }
+  }
+
+  Default: nil
+  ]]
 )
 
 append(
@@ -772,8 +935,8 @@ append(
 -- @param tele_defaults table: (optional) a table containing all of the defaults
 --    for telescope [defaults to `telescope_defaults`]
 function config.set_defaults(user_defaults, tele_defaults)
-  user_defaults = if_nil(user_defaults, {})
-  tele_defaults = if_nil(tele_defaults, telescope_defaults)
+  user_defaults = vim.F.if_nil(user_defaults, {})
+  tele_defaults = vim.F.if_nil(tele_defaults, telescope_defaults)
 
   -- Check if using layout keywords outside of `layout_config`
   deprecated.options(user_defaults)
@@ -781,18 +944,21 @@ function config.set_defaults(user_defaults, tele_defaults)
   local function get(name, default_val)
     if name == "layout_config" then
       return smarter_depth_2_extend(
-        if_nil(user_defaults[name], {}),
-        vim.tbl_deep_extend("keep", if_nil(config.values[name], {}), if_nil(default_val, {}))
+        vim.F.if_nil(user_defaults[name], {}),
+        vim.tbl_deep_extend("keep", vim.F.if_nil(config.values[name], {}), vim.F.if_nil(default_val, {}))
       )
     end
     if name == "history" or name == "cache_picker" or name == "preview" then
       if user_defaults[name] == false or config.values[name] == false then
         return false
       end
+      if user_defaults[name] == true then
+        return vim.F.if_nil(config.values[name], {})
+      end
 
       return smarter_depth_2_extend(
-        if_nil(user_defaults[name], {}),
-        vim.tbl_deep_extend("keep", if_nil(config.values[name], {}), if_nil(default_val, {}))
+        vim.F.if_nil(user_defaults[name], {}),
+        vim.tbl_deep_extend("keep", vim.F.if_nil(config.values[name], {}), vim.F.if_nil(default_val, {}))
       )
     end
     return first_non_null(user_defaults[name], config.values[name], default_val)
@@ -802,9 +968,7 @@ function config.set_defaults(user_defaults, tele_defaults)
     assert(description, "Config values must always have a description")
 
     config.values[name] = get(name, default_val)
-    if description then
-      config.descriptions[name] = strings.dedent(description)
-    end
+    config.descriptions[name] = strings.dedent(description)
   end
 
   for key, info in pairs(tele_defaults) do

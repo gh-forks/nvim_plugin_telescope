@@ -1,4 +1,5 @@
 ---@tag telescope.actions.state
+---@config { ["module"] = "telescope.actions.state", ["name"] = "ACTIONS_STATE" }
 
 ---@brief [[
 --- Functions to be used to determine the current state of telescope.
@@ -16,7 +17,7 @@ function action_state.get_selected_entry()
   return global_state.get_global_key "selected_entry"
 end
 
---- Gets the current line
+--- Gets the current line in the search prompt
 function action_state.get_current_line()
   return global_state.get_global_key "current_line" or ""
 end
@@ -32,6 +33,8 @@ local select_to_edit_map = {
   horizontal = "new",
   vertical = "vnew",
   tab = "tabedit",
+  drop = "drop",
+  ["tab drop"] = "tab drop",
 }
 function action_state.select_key_to_edit_key(type)
   return select_to_edit_map[type]

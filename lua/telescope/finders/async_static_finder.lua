@@ -4,13 +4,13 @@ local make_entry = require "telescope.make_entry"
 
 return function(opts)
   local input_results
-  if vim.tbl_islist(opts) then
+  if require("telescope.utils").islist(opts) then
     input_results = opts
   else
     input_results = opts.results
   end
 
-  local entry_maker = opts.entry_maker or make_entry.gen_from_string()
+  local entry_maker = opts.entry_maker or make_entry.gen_from_string(opts)
 
   local results = {}
   for k, v in ipairs(input_results) do
@@ -24,6 +24,7 @@ return function(opts)
 
   return setmetatable({
     results = results,
+    entry_maker = entry_maker,
     close = function() end,
   }, {
     __call = function(_, _, process_result, process_complete)

@@ -5,6 +5,7 @@ local log = require "plenary.log"
 
 local async = require "plenary.async"
 local channel = require("plenary.async").control.channel
+local utils = require "telescope.utils"
 
 local M = {}
 
@@ -21,7 +22,7 @@ function AsyncJob.new(opts)
   self.stderr = opts.stderr or M.NullPipe()
 
   if opts.cwd and opts.cwd ~= "" then
-    self.uv_opts.cwd = vim.fn.expand(opts.cwd)
+    self.uv_opts.cwd = utils.path_expand(opts.cwd)
     -- this is a "illegal" hack for windows. E.g. If the git command returns `/` rather than `\` as delimiter,
     -- vim.fn.expand might just end up returning an empty string. Weird
     -- Because empty string is not allowed in libuv the job will not spawn. Solution is we just set it to opts.cwd
@@ -53,9 +54,8 @@ function AsyncJob:close(force)
   self:_for_each_pipe(function(p)
     p:close(force)
   end)
-  if not self.handle:is_closing() then
-    self.handle:close()
-  end
+
+  uv.process_kill(self.handle, "sigterm")
 
   log.debug "[async_job] closed"
 end
@@ -67,6 +67,9 @@ M.spawn = function(opts)
     self.uv_opts,
     async.void(function()
       self:close(false)
+      if not self.handle:is_closing() then
+        self.handle:close()
+      end
     end)
   )
 
@@ -298,6 +301,22 @@ M.convert_opts = function(o)
   local obj = {}
 
   obj.args = args
+
+  if o.env then
+    if type(o.env) ~= "table" then
+      error(debug.traceback "'env' has to be a table")
+    end
+
+    local transform = {}
+    for k, v in pairs(o.env) do
+      if type(k) == "number" then
+        table.insert(transform, v)
+      elseif type(k) == "string" then
+        table.insert(transform, k .. "=" .. tostring(v))
+      end
+    end
+    obj.env = transform
+  end
 
   return command, obj
 end
